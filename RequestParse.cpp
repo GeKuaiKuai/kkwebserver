@@ -1,8 +1,10 @@
 #include "RequestParse.h"
+#include <kknet/util/typedef.h>
+#include <kknet/util/public.h>
 #include "functions.h"
-#include "kknet/util/public.h"
 
 using namespace kkwb;
+
 
 void kkwb::versionParse(const char* buf,std::unique_ptr<Request>& request)
 {

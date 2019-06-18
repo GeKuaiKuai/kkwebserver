@@ -1,8 +1,7 @@
 #ifndef KKWB_FASTCGI_H
 #define KKWB_FASTCGI_H
-#include "kknet/net/Client.h"
-#include "kknet/net/EventLoop.h"
-#include "kknet/net/InetAddress.h"
+#include "kknet/reactor/Eventloop.h"
+#include "kknet/reactor/Client.h"
 #include <map>
 
 #include <memory>
@@ -47,9 +46,9 @@ namespace kkwb
             void addParam(const string& key,const string& value,bool http=false);
             void makeParam(char* buf,size_t& index);
             void newConnection(kknet::ConnectionPtr conn);
-            void messageHnadle(kknet::ConnectionPtr conn,kknet::Buffer* buffer);
+            void messageHnadle(kknet::ConnectionPtr conn);
             std::unique_ptr<kknet::Client> client_;
-            kknet::EventLoop* loop_;
+            kknet::Eventloop* loop_;
             HTTPConnectionPtr HTTPConn_;
             std::map<string,string> param_;
     };

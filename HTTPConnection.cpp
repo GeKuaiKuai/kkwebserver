@@ -1,24 +1,26 @@
 #include "HTTPConnection.h"
-#include "functions.h"
-
-#include "kknet/net/Connection.h"
-#include "kknet/net/EventLoop.h"
-
+#include "kknet/util/typedef.h"
+#include "MemoryCache.h"
+#include "kknet/reactor/Connection.h"
+#include "kknet/reactor/Eventloop.h"
+#include <pthread.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include "functions.h"
 using namespace kkwb;
 
 
 
-void HTTPConnection::handleRequest(kknet::Buffer* buffer)
+void HTTPConnection::handleRequest(kknet::KBuffer* buffer)
 {
     char buf[RESPONSE_LINE_LENGTH];
     memInit(buf,sizeof buf);
     if(step_==kversion||step_==khead)
     {
-        while(buffer->readableBytes()!=0 && buffer->getLine(buf))
+        while(buffer->getReadableSize()!=0 && buffer->getLine(buf))
         {
+            
             switch(step_)
             {
                 case kversion:
@@ -27,7 +29,10 @@ void HTTPConnection::handleRequest(kknet::Buffer* buffer)
                     break;
                 case khead:
                     if(!headParse(buf,request_))
+                    {
                         step_ = kbody;
+                    }
+                        
                     break;
             }
             if(step_ == kbody)
@@ -35,15 +40,19 @@ void HTTPConnection::handleRequest(kknet::Buffer* buffer)
             memInit(buf,sizeof buf);
         }
     }
+    
     if(step_ == kbody)
     {
         if(!getHTTPHead("content-length").empty())
         {       
+            //todo 改成分块读取，实现大文件上传
             size_t l = stringToNum<size_t>(getHTTPHead("content-length"));
-            if(buffer->readableBytes()>=l)
+            if(buffer->getReadableSize()>=l)
             {
-                request_->body = string(buffer->readerBegin(),l);
-                buffer->retrieve(l);
+                char body_buf[RESPONSE_LENGTH];
+                memInit(body_buf,sizeof body_buf);
+                buffer->read(body_buf,l);
+                request_->body = string(body_buf);
                 step_ = kresponse;
             }
         }
@@ -53,7 +62,7 @@ void HTTPConnection::handleRequest(kknet::Buffer* buffer)
     }
 
     if(step_ == kresponse)
-        conn_->getLoop()->queueInLoop(std::bind(&HTTPConnection::handleResponse,this));
+        conn_->getLoop()->queueInLoop(std::bind(&HTTPConnection::handleResponse,shared_from_this()));
 
 }
 
@@ -79,11 +88,17 @@ void HTTPConnection::handleResponse()
     //发送文件需要自循环
     if(step_ != kversion && step_ != kwait)
     {
-        conn_->getLoop()->queueInLoop(std::bind(&HTTPConnection::handleResponse,this));
+        conn_->getLoop()->queueInLoop(std::bind(&HTTPConnection::handleResponse,shared_from_this()));
     }
 }
 void HTTPConnection::response()
 {
+    
+    //连接计时器
+    clearTimer();
+    connTimer_ = conn_->getLoop()->runAfter(120,std::bind(&HTTPConnection::close,shared_from_this()));
+    
+
     response_->setVersion();
     //处理网站根目录
     string url = "/home/ak644928/wwwroot"+request_->url;
@@ -123,6 +138,9 @@ void HTTPConnection::response()
     }
     else
     {
+        MemoryCache::getInstance()->lock();
+        MemoryCache::getInstance()->deleteNode(url);
+        MemoryCache::getInstance()->unlock();
         response_->setState(HTTP_STATE_NOTFOUND);
         //处理404页面
         if(false)
@@ -135,6 +153,9 @@ void HTTPConnection::response()
     }
 
     string extendName = getExtendName(url);
+
+    
+
     if(extendName == ".php")
     {
         
@@ -145,7 +166,7 @@ void HTTPConnection::response()
     }
     else
     {
-        
+
         newFileTask(url);
         response_->addHead(HTTP_CONTENT_TYPE,getMIME(extendName));
         char num[HOST_LENGTH] = {0};
@@ -164,7 +185,10 @@ void HTTPConnection::sendHead(bool emptyLine)
 {
     //基本信息
     response_->addHead(HTTP_SERVER,HTTP_SERVER_NAME);
-    response_->addHead("Connection","Keep-Alive");
+    if(request_->headMap["connection"] == "close"||request_->headMap["connection"] == "Close")
+        response_->addHead("Connection","close");
+    else
+        response_->addHead("Connection","Keep-Alive");
 
     char buf[RESPONSE_LENGTH];
     int index = 0;
@@ -213,15 +237,17 @@ void HTTPConnection::sendHead(bool emptyLine)
         ::memcpy(buf+index,"\r\n",2);
         index+=2;
     }
+
     conn_->send(buf,index);
 }
 
 void HTTPConnection::clearFileData()
 {
     filedata_.url.clear();
-    filedata_.fd = 0;
+    filedata_.fd = -1;
     filedata_.length = 0;
     filedata_.offset = 0;
+    filedata_.data.clear();
 }
 
 void HTTPConnection::newFileTask(const string &url)
@@ -229,24 +255,71 @@ void HTTPConnection::newFileTask(const string &url)
     clearFileData();
     filedata_.url = url;
     filedata_.offset = 0;
-    filedata_.fd = ::open(url.c_str(),O_RDONLY|O_CLOEXEC);
     struct stat buf;
-    ::fstat(filedata_.fd,&buf);
+    ::stat(url.c_str(),&buf);
     filedata_.length = buf.st_size;
+    timespec time = buf.st_mtim;
+    
+    if(buf.st_size <= MEMORY_CACHE_MAXFILESIZE)
+    {
+        MemoryCache::getInstance()->lock();
+        CacheNode* node  = MemoryCache::getInstance()->getNode(url);
+        
+        if(!node || node->time.tv_sec != time.tv_sec || node->time.tv_nsec != time.tv_sec)
+        {
+            char databuf[MEMORY_CACHE_MAXFILESIZE] = {0};
+            int fd = ::open(url.c_str(),O_RDONLY|O_CLOEXEC);
+            size_t n = ::read(fd,databuf,MEMORY_CACHE_MAXFILESIZE);
+            
+            ::close(fd);
+            node  = new CacheNode();
+            node->data = string(databuf,n);
+            node->url = url;
+            node->time.tv_sec = time.tv_sec;
+            node->time.tv_nsec = time.tv_nsec;
+            node->length = buf.st_size;
+            MemoryCache::getInstance()->pushNode(url,node);
+        }
+
+        filedata_.data = MemoryCache::getInstance()->getData(url);
+        MemoryCache::getInstance()->unlock();
+    }
+    else
+    {
+        filedata_.fd = ::open(url.c_str(),O_RDONLY|O_CLOEXEC);
+    }
+    
+    
+
 }
 
 void HTTPConnection::sendFile()
 {
-    char buf[MAX_READ_SIZE] = {0};
-    int n = ::read(filedata_.fd,buf,sizeof buf);
+    
+    size_t n = 0;
+    if(filedata_.data.empty())
+    {
+        char buf[MAX_READ_SIZE] = {0};
+        n = ::read(filedata_.fd,buf,sizeof buf);
+        conn_->send(buf,n);
+    }       
+    else
+    {
+        string buf = filedata_.data.substr(filedata_.offset,MAX_READ_SIZE);
+        //printf("%ld %ld %ld\n",filedata_.data.size(),filedata_.offset,filedata_.length);
+        n = buf.size();
+        conn_->send(buf.c_str(),buf.size()); 
+    }
     filedata_.offset += n;
-    conn_->send(buf,n);
     
     if(filedata_.length == filedata_.offset)
     {
-        ::close(filedata_.fd);
+        
+        if(filedata_.data.empty())
+        {
+            ::close(filedata_.fd);
+        }
         reset();
-        //conn_->shutdown();
     }
 }
 
@@ -260,8 +333,18 @@ void HTTPConnection::reset()
     }
     request_.reset(new Request());
     response_.reset(new Response());
+    fastcgi_.reset();
     data_.clear();
     step_ = kversion;
+        
+    
+}
+
+void HTTPConnection::close()
+{
+    //清空连接计时器
+    clearTimer();
+    conn_->forceClose();
 }
 
 void HTTPConnection::sendcgi()

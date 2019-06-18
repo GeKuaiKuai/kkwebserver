@@ -1,6 +1,7 @@
 #include "Response.h"
-#include "kknet/util/public.h"
+#include <kknet/util/typedef.h>
 #include "functions.h"
+
 using namespace kkwb;
 
 void Response::setVersion(const string& version)

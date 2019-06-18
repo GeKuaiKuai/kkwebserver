@@ -1,21 +1,24 @@
 #include "FastCGI.h"
 #include "HTTPConnection.h"
-#include "functions.h"
+#include <kknet/util/typedef.h>
 using namespace kkwb;
 
 FastCGI::FastCGI(const HTTPConnectionPtr& conn)
 :HTTPConn_(conn)
 {
-    kknet::InetAddress serverAddr("127.0.0.1",9000);
+    string ip = "127.0.0.1";
+    int16_t port = 9000;
     loop_ = conn->getConn()->getLoop();
-    client_.reset(new kknet::Client(loop_,serverAddr,"FastCGI"));
+    client_.reset(new kknet::Client(loop_,ip,port,"FastCGI"));
+
     client_->connect();
     client_->setConnectionCallback(std::bind(&FastCGI::newConnection,this,std::placeholders::_1));
-    client_->setMessageCallback(std::bind(&FastCGI::messageHnadle,this,std::placeholders::_1,std::placeholders::_2));    
+    client_->setMessageCallback(std::bind(&FastCGI::messageHnadle,this,std::placeholders::_1));    
 }
 
 void FastCGI::newConnection(kknet::ConnectionPtr conn)
 {
+
     ngx_http_fastcgi_header_t header = {
         1,
         NGX_HTTP_FASTCGI_BEGIN_REQUEST,
@@ -112,6 +115,7 @@ void FastCGI::newConnection(kknet::ConnectionPtr conn)
     };
     
     index = 0;
+    
     size_t left = HTTPConn_->getBody().length();
     size_t size = 0;
 
@@ -136,18 +140,21 @@ void FastCGI::newConnection(kknet::ConnectionPtr conn)
     header3.content_length_hi = 0;
     header3.content_length_lo = 0;
     conn->send(&header3,sizeof header3);
+    
 }
-void FastCGI::messageHnadle(kknet::ConnectionPtr conn,kknet::Buffer* buffer)
+void FastCGI::messageHnadle(kknet::ConnectionPtr conn)
 {
+    kknet::KBuffer *buffer = conn->getInputBuffer();
+
     ngx_http_fastcgi_header_t header;
-    while(buffer->readableBytes() >= sizeof header)
+    while(buffer->getReadableSize() >= sizeof header)
     {
         char buf[RESPONSE_LENGTH] = {0};
 
         buffer->peek(&header,sizeof header);
         size_t len = (header.content_length_hi << 8) + header.content_length_lo;
 
-        if(buffer->readableBytes() - sizeof header < len+header.padding_length)
+        if(buffer->getReadableSize() - sizeof header < len+header.padding_length)
         {
             return;
         }        

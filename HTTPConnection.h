@@ -1,10 +1,12 @@
 #ifndef KKWB_HTTPCONNECTION_h
 #define KKWB_HTTPCONNECTION_h
-#include "kknet/net/Connection.h"
-#include "kknet/net/Buffer.h"
+#include "kknet/reactor/Connection.h"
+#include "kknet/reactor/KBuffer.h"
 #include "FastCGI.h"
 #include "RequestParse.h"
 #include "Response.h"
+
+#include <kknet/reactor/TimeEvent.h>
 #include <memory>
 #define MAX_READ_SIZE 1024*5
 namespace kkwb
@@ -14,6 +16,7 @@ namespace kkwb
         string url;
         uint64_t offset;
         uint64_t length;
+        string data;
         int fd;
     };
 
@@ -24,8 +27,21 @@ namespace kkwb
             HTTPConnection(const kknet::ConnectionPtr& conn):conn_(conn),step_(kversion)
             {
                 reset();
+                
             }
-            void handleRequest(kknet::Buffer* buffer);
+            ~HTTPConnection()
+            {   
+                clearTimer(); 
+            }
+
+            void handleRequest(kknet::KBuffer* buffer);
+
+            void clearTimer()
+            {
+                if(!connTimer_.isEmpty())
+                    conn_->getLoop()->cancel(connTimer_);  
+            }
+
             kknet::ConnectionPtr getConn()
             {
                 return conn_;
@@ -75,7 +91,8 @@ namespace kkwb
             void reset();
             void handleResponse();
             void sendcgi();
-            
+            //关闭连接
+            void close();
             void sendData(const char*pos,size_t length);
             //向客户端发送错误信息
             void sendError();
@@ -100,6 +117,8 @@ namespace kkwb
             FileData filedata_;
             std::unique_ptr<Response> response_;
             std::unique_ptr<FastCGI> fastcgi_;
+            kknet::TimerId connTimer_;
+            kknet::TimerId cigTimer_;
             //CGI数据 or 异常信息
             string data_;
 
